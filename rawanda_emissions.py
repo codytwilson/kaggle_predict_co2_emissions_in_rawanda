@@ -13,6 +13,7 @@ from tensorflow.keras import layers
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from keras import backend as K
+from sklearn.cluster import KMeans
 
 train_file = '.\\train.csv'
 test_file = '.\\test.csv'
@@ -24,11 +25,21 @@ train = train.sort_values(by=['latitude','longitude','year','week_no'])
 
 head = train.head()
 
-latlong_count = train.groupby(['latitude','longitude']).count()['week_no']
+# latlong_count = train.groupby(['latitude','longitude'], as_index=False).count()['week_no']
+latlong_count = train.groupby(['latitude','longitude'], as_index=False).agg({'week_no':'count', 'emission':['max','mean','std']})
+latlong_count = latlong_count.sort_values(('emission','mean'), ascending=False)
 
-one_lat_long = train[(train['latitude'] == latlong_count.index[0][0]) & (train['longitude'] == latlong_count.index[0][1])]
+kmeans_emission = KMeans(n_clusters=7)
+latlong_count['kmeans_emission_group'] = kmeans_emission.fit_predict(latlong_count[('emission','mean')].to_numpy().reshape(-1,1))
+kmeans_location = KMeans(n_clusters=10)
 
-one_lat_long_test = test[(test['latitude'] == latlong_count.index[0][0]) & (test['longitude'] == latlong_count.index[0][1])]
+kmeans_location.fit(latlong_count[[('latitude',''),('longitude','')]])
+labels = kmeans_location.predict(latlong_count[[('latitude',''),('longitude','')]])
+centroids  = kmeans_location.cluster_centers_
+[centroids[i] for i in labels]
+latlong_count['kmeans_location_group'] = labels
+
+
 
 
 def datetimeindex_from_year_weekno(df):
@@ -58,7 +69,6 @@ def interpolate_by_group(df):
     return pd.concat(interpolated_df)   
 
 train = interpolate_by_group(train) 
-one_lat_long_interpolated = train[(train['latitude'] == latlong_count.index[0][0]) & (train['longitude'] == latlong_count.index[0][1])]
            
 na_count2 = train.isna().sum()      
 train = train.interpolate(method='linear')
@@ -66,7 +76,20 @@ na_count3 = train.isna().sum()
   
 train = train.set_index(['index'])
 test = test.set_index(['index'])
+
+def put_kmeans_groups_onto_df(df):
+    df = pd.merge(df, latlong_count[['latitude','longitude','kmeans_emission_group','kmeans_location_group']], left_on=['latitude','longitude'], right_on=[('latitude',''),('longitude','')], how='left')
+    df = df.drop(axis='columns', columns=[('latitude', ''),('longitude', '')])
+    df = df.rename(mapper={('kmeans_emission_group', ''):'kmeans_emission_group',
+                                 ('kmeans_location_group', ''):'kmeans_location_group'},
+                   axis='columns')
+
+    return df
     
+train = put_kmeans_groups_onto_df(train)
+train_head = train.head()
+test = put_kmeans_groups_onto_df(test)
+
 # interpolate with time method
 # train = train.interpolate(method='time')
 # interpolate with linear method
@@ -76,14 +99,15 @@ plt.matshow(train.corr())
 
 correlation_matrix = train.corr(method='pearson')['emission']
 correlation_matrix = correlation_matrix.drop(['latitude','longitude','emission','week_no'])
+# correlation_matrix = correlation_matrix.drop(['emission','week_no'])
 other_columns_to_drop = [i for i in list(correlation_matrix.index) if 'angle' in i or 'azimuth' in i or 'zenith' in i]
 correlation_matrix = correlation_matrix.drop(other_columns_to_drop)
 correlation_matrix = correlation_matrix.sort_values(ascending=False)
 
 
 
-columns_necisito = list(train.columns[:5])
-columns_regressors = list(correlation_matrix.index[:15])
+columns_necisito = ['ID_LAT_LON_YEAR_WEEK','year','week_no', 'latitude','longitude']
+columns_regressors = list(correlation_matrix.index[:20])
 target = 'emission'
 
 train1 = train[columns_necisito + columns_regressors + [target]]
@@ -120,7 +144,7 @@ print(X_test.shape)
 #%%
 sequence_length = 1
 learning_rate = 0.001
-epochs = 100
+epochs = 1000
 batch_size = 256
 
 
@@ -212,3 +236,9 @@ pred_normalized = model.predict(dataset_test)
 
 pred_denormalized = scaler_target.inverse_transform(pred_normalized)
 
+output = test2[columns_necisito]
+output[target] = pred_denormalized
+
+output = output.sort_index()
+
+output[['ID_LAT_LON_YEAR_WEEK','emission']].to_csv('.\\output3.csv', index=False)
